@@ -51,6 +51,18 @@ class FakeDb:
             raise DbError("No plan found for the given sql_id", 404)
         return f"PLAN TEXT for {sql_id} via {source}"
 
+    def fetch_metadata(self, sql_id, plan_hash=None):
+        self.metadata_calls = getattr(self, "metadata_calls", [])
+        self.metadata_calls.append((sql_id, plan_hash))
+        if sql_id == "brokenjson000":
+            return "this is not json {"
+        return (
+            '{"format":"ora-plan-metadata","version":2,'
+            '"plan_ref":{"sql_id":"%s","plan_hash_value":%s},'
+            '"objects":{},"coverage_warnings":[]}'
+            % (sql_id, "null" if plan_hash is None else plan_hash)
+        )
+
 
 @pytest.fixture
 def running_server():
@@ -224,6 +236,55 @@ def test_fetch_plan_missing_sql_id(running_server):
         headers={"Authorization": f"Bearer {TOKEN}"},
     )
     assert status == 400
+    assert "error" in payload
+
+
+def test_metadata_returns_bundle(running_server):
+    base_url, db = running_server
+    status, _headers, payload = _request(
+        f"{base_url}/api/metadata?sqlId=abc123&planHash=987654321",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert status == 200
+    assert payload["bundle"]["format"] == "ora-plan-metadata"
+    assert payload["bundle"]["plan_ref"]["plan_hash_value"] == 987654321
+    assert db.metadata_calls == [("abc123", 987654321)]
+
+
+def test_metadata_requires_token(running_server):
+    base_url, _db = running_server
+    status, _headers, payload = _request(f"{base_url}/api/metadata?sqlId=abc123")
+    assert status == 401
+    assert "error" in payload
+
+
+def test_metadata_missing_sql_id(running_server):
+    base_url, _db = running_server
+    status, _headers, payload = _request(
+        f"{base_url}/api/metadata",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert status == 400
+    assert "error" in payload
+
+
+def test_metadata_bad_plan_hash(running_server):
+    base_url, _db = running_server
+    status, _headers, payload = _request(
+        f"{base_url}/api/metadata?sqlId=abc123&planHash=xyz",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert status == 400
+    assert "error" in payload
+
+
+def test_metadata_invalid_bundle_json_maps_to_500(running_server):
+    base_url, _db = running_server
+    status, _headers, payload = _request(
+        f"{base_url}/api/metadata?sqlId=brokenjson000",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+    )
+    assert status == 500
     assert "error" in payload
 
 

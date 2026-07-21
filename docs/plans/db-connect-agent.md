@@ -1,6 +1,10 @@
 # Local DB-Connect Agent for the Oracle Execution Plan Visualizer
 
-> **Status (2026-07-21, branch `feat/db-connect-agent`):** Phases 1–3 implemented. The Python agent has been extracted to its own adjacent repo `oraplanviz-agent` (`~/claude_projects/oraplanviz-agent`); the frontend repo (`ora_explain_plan_viz`) keeps only the frontend integration (Connect panel behind `VITE_ENABLE_DB_AGENT`, `src/lib/agent/client.ts`), merged to its `main` (commit `808d5ca`). Remaining (in this agent repo): dbmint e2e, metadata endpoint (Phase 4), docs polish, PyPI publish.
+> **Status (2026-07-21, `main`):** Phases 1–4 implemented. The Python agent has been extracted to its own adjacent repo `oraplanviz-agent` (`~/claude_projects/oraplanviz-agent`); the frontend repo (`ora_explain_plan_viz`) keeps only the frontend integration (Connect panel behind `VITE_ENABLE_DB_AGENT`, `src/lib/agent/client.ts`), merged to its `main` (commit `808d5ca`).
+>
+> **Phase 4 (`/api/metadata`) done** — implemented by vendoring `gather_plan_metadata.sql` as package data and transforming its anonymous PL/SQL block at runtime (`metadata.py`): `'&arg1'`/`'&arg2'` become `:arg1`/`:arg2` binds, the DBMS_OUTPUT emit loop becomes a `:bundle` OUT CLOB — byte-identical `ora-plan-metadata` v2 JSON with zero contract drift. Unit suite: 39 tests, driver-free.
+>
+> Remaining: **dbmint e2e** (`tests/test_e2e_live.py`, gated on `ORAPLANVIZ_E2E_DSN/USER/PASSWORD`; blocked 2026-07-21 — dbmint unreachable off-network. Prereq once reachable: `GRANT SELECT_CATALOG_ROLE TO planviz;` in PDB1, then `ORAPLANVIZ_E2E_DSN=//poug-dg1.localdomain:1521/pdb1.world ORAPLANVIZ_E2E_USER=planviz ORAPLANVIZ_E2E_PASSWORD=planviz pytest -q tests/test_e2e_live.py`). Also remaining: frontend "Load plan + metadata" button + command-palette entry (in `ora_explain_plan_viz`), cross-browser Pages-origin verification (deprioritized), PyPI publish (user action).
 
 ## Context
 

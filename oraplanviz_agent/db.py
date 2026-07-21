@@ -246,3 +246,39 @@ class Db:
             raise
         except Exception as exc:  # noqa: BLE001
             raise DbError(f"Query failed: {exc}", 502) from exc
+
+    def fetch_metadata(self, sql_id: str, plan_hash: Optional[int] = None) -> str:
+        """Run the vendored gather_plan_metadata.sql PL/SQL block and return
+        the raw `ora-plan-metadata` bundle JSON text.
+
+        The gather itself is best-effort by design: privilege gaps degrade to
+        entries in the bundle's coverage_warnings, never to an error here.
+        """
+        from .metadata import get_metadata_block
+
+        driver = _ensure_driver()
+        connection = self._require_connection()
+        block = get_metadata_block()
+
+        try:
+            cursor = connection.cursor()
+            try:
+                bundle_var = cursor.var(driver.DB_TYPE_CLOB)
+                cursor.execute(
+                    block,
+                    arg1=sql_id,
+                    arg2=None if plan_hash is None else str(plan_hash),
+                    bundle=bundle_var,
+                )
+                value = bundle_var.getvalue()
+            finally:
+                cursor.close()
+        except DbError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise DbError(f"Metadata gather failed: {exc}", 502) from exc
+
+        if value is None:
+            raise DbError("Metadata gather returned no bundle", 500)
+        read = getattr(value, "read", None)
+        return read() if callable(read) else str(value)

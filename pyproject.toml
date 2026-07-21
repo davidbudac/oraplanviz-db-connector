@@ -24,3 +24,6 @@ oraplanviz-agent = "oraplanviz_agent.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["oraplanviz_agent*"]
+
+[tool.setuptools.package-data]
+oraplanviz_agent = ["*.sql"]

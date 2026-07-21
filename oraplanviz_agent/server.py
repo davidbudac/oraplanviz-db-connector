@@ -109,6 +109,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             self._handle_recent_sql(query)
         elif path == "/api/plan":
             self._handle_fetch_plan(query)
+        elif path == "/api/metadata":
+            self._handle_metadata(query)
         else:
             self._send_error_json(404, "Not found")
 
@@ -204,6 +206,35 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"source": source, "text": text})
         except DbError as exc:
             self._send_error_json(exc.status_code, exc.message)
+
+    def _handle_metadata(self, query: dict):
+        sql_id = (query.get("sqlId") or [None])[0]
+        plan_hash_raw = (query.get("planHash") or [None])[0]
+
+        if not sql_id or not _SQL_ID_RE.match(sql_id):
+            self._send_error_json(400, "Invalid or missing sqlId")
+            return
+        plan_hash = None
+        if plan_hash_raw is not None:
+            try:
+                plan_hash = int(plan_hash_raw)
+            except ValueError:
+                self._send_error_json(400, "Invalid planHash")
+                return
+
+        try:
+            text = self.db.fetch_metadata(sql_id=sql_id, plan_hash=plan_hash)
+        except DbError as exc:
+            self._send_error_json(exc.status_code, exc.message)
+            return
+
+        try:
+            bundle = json.loads(text)
+        except json.JSONDecodeError as exc:
+            logger.error("Metadata gather produced invalid JSON: %s", exc)
+            self._send_error_json(500, "Metadata gather produced an invalid bundle")
+            return
+        self._send_json(200, {"bundle": bundle})
 
 
 def create_server(db, token: str, allowed_origins, port: int, host: str = "127.0.0.1"):

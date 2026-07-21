@@ -20,7 +20,6 @@ sees them.
 pipx install oraplanviz-agent
 
 # or, from a checkout of this repo
-cd agent
 pip install -e .
 ```
 
@@ -109,10 +108,16 @@ unless you know you're licensed for the others.
 
 ## Minimal DB grants
 
-The agent's DB user needs read access to a handful of dynamic performance
-views, plus implicit execute on the `DBMS_XPLAN`/`DBMS_SQL_MONITOR` packages
-(these are typically already grantable via `SELECT_CATALOG_ROLE` or your DBA
-team's standard read-only role):
+The simplest working setup is the standard read-only catalog role:
+
+```sql
+GRANT SELECT_CATALOG_ROLE TO planviz_agent_user;
+```
+
+This covers every endpoint including `/api/metadata` at full coverage. If you
+prefer narrower grants, the agent's DB user needs read access to a handful of
+dynamic performance views, plus execute on the `DBMS_XPLAN`/`DBMS_SQL_MONITOR`
+packages:
 
 ```sql
 GRANT SELECT ON v$sql TO planviz_agent_user;
@@ -126,7 +131,8 @@ GRANT EXECUTE ON DBMS_SQL_MONITOR TO planviz_agent_user;
 ```
 
 `source=awr` additionally requires access to `DBA_HIST_*` views (Diagnostics
-Pack).
+Pack). `/api/metadata` works with any level of access and reports whatever it
+could not read in the bundle's `coverage_warnings`.
 
 ## API reference
 
@@ -140,14 +146,30 @@ an `Authorization: Bearer <token>` header.
 | POST   | `/api/disconnect`   | → `{ ok: true }`. |
 | GET    | `/api/sql/recent`   | Query `?source=cursor|monitor` → `{ items: [...] }`. |
 | GET    | `/api/plan`         | Query `?sqlId=&source=cursor|monitor|awr&childNumber=&sqlExecId=` → `{ source, text }` (raw plan text — the app auto-detects the format). |
+| GET    | `/api/metadata`     | Query `?sqlId=[&planHash=]` → `{ bundle }` — an `ora-plan-metadata` v2 JSON bundle (object/column/index statistics, constraints, DDL, optimizer environment) for the objects referenced by the SQL_ID. |
+
+### Metadata bundles
+
+`/api/metadata` runs the visualizer's canonical `gather_plan_metadata.sql`
+PL/SQL block (vendored into this package) against your connected database and
+returns the resulting bundle. The gather is best-effort by design: missing
+privileges degrade to entries in the bundle's `coverage_warnings` array
+instead of failing the request. For full coverage (DDL of other schemas'
+objects, segment sizes, SQL plan baselines/profiles/directives) connect as a
+user with `SELECT_CATALOG_ROLE`.
 
 ## Development
 
 ```bash
-cd agent
 pip install -e ".[dev]"
 python3 -m pytest -q
 ```
 
 Tests run without the real `oracledb` driver installed — `db.py` imports it
 lazily and the test suite monkeypatches a fake driver in its place.
+
+The `oraplanviz_agent/gather_plan_metadata.sql` template is vendored verbatim
+from `ora_explain_plan_viz/scripts/gather_plan_metadata.sql`; when the
+upstream script changes, re-copy it here (the transformation in
+`metadata.py` adapts it at runtime and its tests will fail loudly if the
+template's structure drifts).
