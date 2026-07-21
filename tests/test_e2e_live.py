@@ -185,7 +185,9 @@ def test_metadata_on_user_table(agent):
         if not row:
             pytest.skip("connected schema owns no tables")
         table = row[0]
-        cursor.execute(f'SELECT /* {tag} */ COUNT(*) FROM "{table}"')
+        # FULL hint: a plain COUNT(*) can be answered by an index fast full
+        # scan, leaving only an INDEX object in the plan.
+        cursor.execute(f'SELECT /*+ FULL(t) */ /* {tag} */ COUNT(*) FROM "{table}" t')
         cursor.fetchall()
         cursor.execute(
             "SELECT sql_id FROM v$sql "

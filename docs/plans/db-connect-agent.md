@@ -4,7 +4,9 @@
 >
 > **Phase 4 (`/api/metadata`) done** — implemented by vendoring `gather_plan_metadata.sql` as package data and transforming its anonymous PL/SQL block at runtime (`metadata.py`): `'&arg1'`/`'&arg2'` become `:arg1`/`:arg2` binds, the DBMS_OUTPUT emit loop becomes a `:bundle` OUT CLOB — byte-identical `ora-plan-metadata` v2 JSON with zero contract drift. Unit suite: 39 tests, driver-free.
 >
-> Remaining: **dbmint e2e** (`tests/test_e2e_live.py`, gated on `ORAPLANVIZ_E2E_DSN/USER/PASSWORD`; blocked 2026-07-21 — dbmint unreachable off-network. Prereq once reachable: `GRANT SELECT_CATALOG_ROLE TO planviz;` in PDB1, then `ORAPLANVIZ_E2E_DSN=//poug-dg1.localdomain:1521/pdb1.world ORAPLANVIZ_E2E_USER=planviz ORAPLANVIZ_E2E_PASSWORD=planviz pytest -q tests/test_e2e_live.py`). Also remaining: frontend "Load plan + metadata" button + command-palette entry (in `ora_explain_plan_viz`), cross-browser Pages-origin verification (deprioritized), PyPI publish (user action).
+> **dbmint e2e DONE (2026-07-21):** all 8 live tests pass against PDB1 (19.27) — connect, recent SQL, cursor plan, monitor plan (real Tuning Pack XML), metadata bundles for dictionary and heap-table queries. Captured real agent responses were also validated against the frontend parsers in `ora_explain_plan_viz` (cursor ALLSTATS text → runtime-stats parser with actual stats; monitor XML → `sql_monitor_xml` with sqlId; bundle → `parseBundle` v2 with TABLE/INDEX objects, column stats, DDL, zero coverage warnings). Notes: PLANVIZ was granted `SELECT_CATALOG_ROLE` in PDB1; from the Mac the DB is reached via SSH tunnel `ssh -p 2201 -L 15210:192.168.56.121:1521 oracle@dbmint` (port 1521 isn't forwarded; listener binds to poug-dg1.localdomain = 192.168.56.121), DSN `//127.0.0.1:15210/pdb1.world`.
+>
+> Remaining: frontend "Load plan + metadata" button + command-palette entry (in `ora_explain_plan_viz`), cross-browser Pages-origin verification (deprioritized), PyPI publish (user action).
 
 ## Context
 
