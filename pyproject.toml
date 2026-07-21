@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oraplanviz-agent"
+version = "0.1.0"
+description = "Local DB-connect agent for the Oracle Execution Plan Visualizer"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Oracle Execution Plan Visualizer" }]
+dependencies = [
+    "oracledb>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+oraplanviz-agent = "oraplanviz_agent.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["oraplanviz_agent*"]
