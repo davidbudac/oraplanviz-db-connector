@@ -1,6 +1,6 @@
-# oraplanviz-agent
+# oraplanviz-db-connector
 
-A minimal local companion agent for the [Oracle Execution Plan
+A minimal local companion (formerly `oraplanviz-agent`; the CLI command is still `oraplanviz-agent`) for the [Oracle Execution Plan
 Visualizer](https://davidbudac.github.io). It runs on **your own machine**,
 connects to **your** Oracle database using
 [python-oracledb](https://python-oracledb.readthedocs.io/) in **thin mode**
