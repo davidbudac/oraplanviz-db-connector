@@ -13,7 +13,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .db import DbError
+from .db import DbError, TestDb
 
 logger = logging.getLogger("oraplanviz_agent.server")
 
@@ -31,6 +31,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
 
     # These are set by create_server() via a subclass / class attrs.
     db = None
+    #: The separate test connection (`TestDb`) backing /api/test/*. Never `db`.
+    test_db = None
     token: str = ""
     allowed_origins: list = []
 
@@ -111,6 +113,8 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             self._handle_fetch_plan(query)
         elif path == "/api/metadata":
             self._handle_metadata(query)
+        elif path == "/api/test/log":
+            self._handle_test_log()
         else:
             self._send_error_json(404, "Not found")
 
@@ -125,6 +129,14 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             self._handle_connect()
         elif path == "/api/disconnect":
             self._handle_disconnect()
+        elif path == "/api/test/connect":
+            self._handle_test_connect()
+        elif path == "/api/test/exec":
+            self._handle_test_exec()
+        elif path == "/api/test/explain":
+            self._handle_test_explain()
+        elif path == "/api/test/disconnect":
+            self._handle_test_disconnect()
         else:
             self._send_error_json(404, "Not found")
 
@@ -143,6 +155,9 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
                 "version": __version__,
                 "connected": bool(self.db and self.db.is_connected),
                 "oracleVersion": self.db.oracle_version if self.db else None,
+                # Whether the separate test connection is open, so the app can
+                # tell whether script execution is available at all.
+                "testConnected": bool(self.test_db and self.test_db.is_connected),
             },
         )
 
@@ -236,14 +251,73 @@ class AgentRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {"bundle": bundle})
 
+    # -- test connection (approval-gated script execution) ------------------
+    #
+    # These run on `test_db`, a second Oracle session that is never the
+    # read-only source connection above. The UI is responsible for getting an
+    # explicit user approval before every /api/test/exec call; the agent's job
+    # is to keep the two sessions apart and to log everything it runs.
 
-def create_server(db, token: str, allowed_origins, port: int, host: str = "127.0.0.1"):
-    """Build a ThreadingHTTPServer wired to the given Db instance."""
+    def _handle_test_connect(self):
+        try:
+            body = self._read_json_body()
+            dsn = body.get("dsn")
+            user = body.get("user")
+            password = body.get("password")
+            if not dsn or not user or not password:
+                raise DbError("dsn, user, and password are required", 400)
+            self.test_db.connect(dsn, user, password)
+            self._send_json(200, {"ok": True, "oracleVersion": self.test_db.oracle_version})
+        except DbError as exc:
+            self._send_error_json(exc.status_code, exc.message)
+
+    def _handle_test_disconnect(self):
+        self.test_db.disconnect()
+        self._send_json(200, {"ok": True})
+
+    def _handle_test_exec(self):
+        try:
+            body = self._read_json_body()
+            script = body.get("script")
+            if not isinstance(script, str) or not script.strip():
+                raise DbError("script is required", 400)
+            result = self.test_db.exec_script(script)
+        except DbError as exc:
+            self._send_error_json(exc.status_code, exc.message)
+            return
+        # A statement that failed is reported in-band (`ok: false`), not as an
+        # HTTP error: the caller wants the transcript either way.
+        self._send_json(200, result)
+
+    def _handle_test_explain(self):
+        try:
+            body = self._read_json_body()
+            sql = body.get("sql")
+            if not isinstance(sql, str) or not sql.strip():
+                raise DbError("sql is required", 400)
+            text = self.test_db.explain(sql)
+        except DbError as exc:
+            self._send_error_json(exc.status_code, exc.message)
+            return
+        self._send_json(200, {"dbmsXplanText": text})
+
+    def _handle_test_log(self):
+        self._send_json(200, {"items": self.test_db.statement_log})
+
+
+def create_server(db, token: str, allowed_origins, port: int, host: str = "127.0.0.1", test_db=None):
+    """Build a ThreadingHTTPServer wired to the given Db instance.
+
+    `test_db` is the separate connection used by /api/test/*; one is created if
+    the caller does not supply it, so the two sessions can never collapse into
+    the same object by accident.
+    """
 
     class _Handler(AgentRequestHandler):
         pass
 
     _Handler.db = db
+    _Handler.test_db = test_db if test_db is not None else TestDb()
     _Handler.token = token
     _Handler.allowed_origins = list(allowed_origins)
 

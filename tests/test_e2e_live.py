@@ -218,3 +218,153 @@ def test_disconnect(agent):
     assert status == 200
     status, payload = _request(f"{base_url}/api/health", token="")
     assert payload["connected"] is False
+
+
+# -- /api/test/* -------------------------------------------------------------
+#
+# These run on the agent's separate test connection. They use the same
+# credentials as the source connection for convenience, but a real user would
+# point them at a scratch schema.
+
+
+@pytest.fixture(scope="module")
+def test_connection(agent):
+    base_url, _db = agent
+    status, payload = _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": DSN, "user": USER, "password": PASSWORD},
+    )
+    assert status == 200, payload
+    assert payload["ok"] is True
+    try:
+        yield base_url
+    finally:
+        _request(f"{base_url}/api/test/disconnect", method="POST", body={})
+
+
+def test_test_connection_is_reported_separately(test_connection):
+    base_url = test_connection
+    status, payload = _request(f"{base_url}/api/health", token="")
+    assert status == 200
+    assert payload["testConnected"] is True
+
+
+def test_test_exec_script_transcript(test_connection):
+    base_url = test_connection
+    script = (
+        "SET SERVEROUTPUT ON\n"
+        "SELECT 1 AS one FROM dual;\n"
+        "BEGIN\n"
+        "  DBMS_OUTPUT.PUT_LINE('hello from oraplanviz');\n"
+        "END;\n"
+        "/\n"
+    )
+    status, payload = _request(
+        f"{base_url}/api/test/exec", method="POST", body={"script": script}
+    )
+    assert status == 200, payload
+    assert payload["ok"] is True, payload["errors"]
+    assert payload["errors"] == []
+    output = payload["output"]
+    assert "skipped SQL*Plus command" in output  # SET SERVEROUTPUT ON
+    assert "1 row selected." in output
+    assert "hello from oraplanviz" in output
+    assert "PL/SQL procedure successfully completed." in output
+
+
+def test_test_exec_reports_ora_errors_without_aborting(test_connection):
+    base_url = test_connection
+    script = (
+        "SELECT * FROM a_table_that_does_not_exist_xyz;\n" "SELECT 2 AS two FROM dual;\n"
+    )
+    status, payload = _request(
+        f"{base_url}/api/test/exec", method="POST", body={"script": script}
+    )
+    assert status == 200, payload
+    assert payload["ok"] is False
+    assert any("ORA-00942" in err for err in payload["errors"]), payload["errors"]
+    # The second statement still ran.
+    assert "1 row selected." in payload["output"]
+
+
+def test_test_explain_with_bind_variables(test_connection):
+    base_url = test_connection
+    status, payload = _request(
+        f"{base_url}/api/test/explain",
+        method="POST",
+        body={
+            "sql": "SELECT /*+ FULL(t) */ COUNT(*) FROM all_objects t "
+            "WHERE owner = :owner_name"
+        },
+    )
+    assert status == 200, payload
+    text = payload["dbmsXplanText"]
+    assert "Plan hash value" in text
+    assert "| Id  |" in text
+
+
+def test_test_explain_bad_sql_is_400(test_connection):
+    base_url = test_connection
+    status, payload = _request(
+        f"{base_url}/api/test/explain",
+        method="POST",
+        body={"sql": "SELECT * FROM a_table_that_does_not_exist_xyz"},
+    )
+    assert status == 400, payload
+    assert "ORA-00942" in payload["error"]
+
+
+def test_test_exec_repro_cycle_on_a_scratch_table(test_connection):
+    """The Phase-8 loop in miniature: build a table, stat it, explain it."""
+    base_url = test_connection
+    table = f"OPV_E2E_{uuid.uuid4().hex[:8].upper()}"
+
+    status, payload = _request(
+        f"{base_url}/api/test/exec",
+        method="POST",
+        body={"script": f"CREATE TABLE {table} (id NUMBER, pad VARCHAR2(100));"},
+    )
+    assert status == 200, payload
+    if not payload["ok"]:
+        pytest.skip(f"cannot create tables in this schema: {payload['errors']}")
+
+    try:
+        script = (
+            f"INSERT INTO {table} SELECT LEVEL, RPAD('x', 100, 'x') "
+            "FROM dual CONNECT BY LEVEL <= 1000;\n"
+            "COMMIT;\n"
+            f"BEGIN DBMS_STATS.GATHER_TABLE_STATS(USER, '{table}'); END;\n"
+            "/\n"
+            f"SELECT COUNT(*) AS cnt FROM {table};\n"
+        )
+        status, payload = _request(
+            f"{base_url}/api/test/exec", method="POST", body={"script": script}
+        )
+        assert status == 200, payload
+        assert payload["ok"] is True, payload["errors"]
+        assert "1000 rows inserted." in payload["output"]
+        assert "Commit complete." in payload["output"]
+        assert "PL/SQL procedure successfully completed." in payload["output"]
+        assert "1000" in payload["output"]
+
+        status, payload = _request(
+            f"{base_url}/api/test/explain",
+            method="POST",
+            body={"sql": f"SELECT * FROM {table} WHERE id = :id"},
+        )
+        assert status == 200, payload
+        assert table in payload["dbmsXplanText"]
+
+        status, payload = _request(f"{base_url}/api/test/log")
+        assert status == 200
+        statements = [item["statement"] for item in payload["items"]]
+        assert any(s.startswith("CREATE TABLE") for s in statements)
+        assert any(s.startswith("SELECT * FROM") for s in statements)
+        assert all(item["durationMs"] is not None for item in payload["items"])
+    finally:
+        _request(
+            f"{base_url}/api/test/exec",
+            method="POST",
+            body={"script": f"DROP TABLE {table} PURGE;"},
+        )

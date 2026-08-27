@@ -64,6 +64,51 @@ class FakeDb:
         )
 
 
+class FakeTestDb:
+    """Stand-in for TestDb: records what the /api/test/* routes asked for."""
+
+    def __init__(self):
+        self.connected = False
+        self.oracle_version = None
+        self.connect_calls = []
+        self.disconnect_calls = 0
+        self.scripts = []
+        self.explains = []
+        self.statement_log = [{"seq": 1, "statement": "SELECT 1 FROM dual", "ok": True}]
+
+    @property
+    def is_connected(self):
+        return self.connected
+
+    def connect(self, dsn, user, password):
+        self.connect_calls.append((dsn, user, password))
+        if password == "wrong":
+            raise DbError("Failed to connect: bad password", 502)
+        self.connected = True
+        self.oracle_version = "19.27.0.0.0"
+
+    def disconnect(self):
+        self.disconnect_calls += 1
+        self.connected = False
+        self.oracle_version = None
+
+    def exec_script(self, script):
+        self.scripts.append(script)
+        if not self.connected:
+            raise DbError("test connection not open", 409)
+        if "boom" in script:
+            return {"ok": False, "output": "SQL> boom", "errors": ["line 1: ORA-00942"]}
+        return {"ok": True, "output": "Table created.", "errors": []}
+
+    def explain(self, sql):
+        self.explains.append(sql)
+        if not self.connected:
+            raise DbError("test connection not open", 409)
+        if "bad" in sql:
+            raise DbError("EXPLAIN PLAN failed: ORA-00942", 400)
+        return "Plan hash value: 42"
+
+
 @pytest.fixture
 def running_server():
     db = FakeDb()
@@ -73,6 +118,25 @@ def running_server():
     port = server.server_address[1]
     try:
         yield f"http://127.0.0.1:{port}", db
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+@pytest.fixture
+def running_test_server():
+    """Server whose /api/test/* routes are backed by a FakeTestDb."""
+    db = FakeDb()
+    test_db = FakeTestDb()
+    server = create_server(
+        db, token=TOKEN, allowed_origins=[ALLOWED_ORIGIN], port=0, test_db=test_db
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+    try:
+        yield f"http://127.0.0.1:{port}", db, test_db
     finally:
         server.shutdown()
         server.server_close()
@@ -286,6 +350,309 @@ def test_metadata_invalid_bundle_json_maps_to_500(running_server):
     )
     assert status == 500
     assert "error" in payload
+
+
+# -- /api/test/* (approval-gated script execution) --------------------------
+
+
+def _auth(token=TOKEN):
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_test_connect_uses_the_test_db_not_the_source_db(running_test_server):
+    base_url, db, test_db = running_test_server
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "host:1521/scratch", "user": "eval", "password": "pw"},
+        headers=_auth(),
+    )
+    assert status == 200
+    assert payload == {"ok": True, "oracleVersion": "19.27.0.0.0"}
+    assert test_db.connect_calls == [("host:1521/scratch", "eval", "pw")]
+    # The read-only source connection was untouched.
+    assert db.connect_calls == []
+    assert db.connected is False
+
+
+def test_test_connect_requires_all_credentials(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "host:1521/scratch"},
+        headers=_auth(),
+    )
+    assert status == 400
+    assert "error" in payload
+
+
+def test_test_connect_failure_maps_to_502(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    status, _headers, _payload = _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "host:1521/scratch", "user": "eval", "password": "wrong"},
+        headers=_auth(),
+    )
+    assert status == 502
+
+
+def test_test_endpoints_require_a_token(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    for path, body in (
+        ("/api/test/connect", {"dsn": "d", "user": "u", "password": "p"}),
+        ("/api/test/exec", {"script": "SELECT 1 FROM dual;"}),
+        ("/api/test/explain", {"sql": "SELECT 1 FROM dual"}),
+        ("/api/test/disconnect", {}),
+    ):
+        status, _headers, payload = _request(f"{base_url}{path}", method="POST", body=body)
+        assert status == 401, path
+        assert "error" in payload
+
+
+def test_test_exec_returns_ok_output_errors(running_test_server):
+    base_url, _db, test_db = running_test_server
+    _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "d", "user": "u", "password": "p"},
+        headers=_auth(),
+    )
+
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/exec",
+        method="POST",
+        body={"script": "CREATE TABLE t (id NUMBER);"},
+        headers=_auth(),
+    )
+    assert status == 200
+    assert payload == {"ok": True, "output": "Table created.", "errors": []}
+    assert test_db.scripts == ["CREATE TABLE t (id NUMBER);"]
+
+
+def test_test_exec_reports_statement_failures_in_band(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "d", "user": "u", "password": "p"},
+        headers=_auth(),
+    )
+
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/exec",
+        method="POST",
+        body={"script": "boom;"},
+        headers=_auth(),
+    )
+    # A failed statement is still a successful request: the caller wants the
+    # transcript and the error text.
+    assert status == 200
+    assert payload["ok"] is False
+    assert payload["errors"] == ["line 1: ORA-00942"]
+
+
+def test_test_exec_without_a_connection_is_409(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/exec",
+        method="POST",
+        body={"script": "SELECT 1 FROM dual;"},
+        headers=_auth(),
+    )
+    assert status == 409
+    assert payload["error"] == "test connection not open"
+
+
+def test_test_exec_requires_a_script(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/exec", method="POST", body={"script": "   "}, headers=_auth()
+    )
+    assert status == 400
+    assert "error" in payload
+
+
+def test_test_explain_returns_dbms_xplan_text(running_test_server):
+    base_url, _db, test_db = running_test_server
+    _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "d", "user": "u", "password": "p"},
+        headers=_auth(),
+    )
+
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/explain",
+        method="POST",
+        body={"sql": "SELECT 1 FROM dual"},
+        headers=_auth(),
+    )
+    assert status == 200
+    assert payload == {"dbmsXplanText": "Plan hash value: 42"}
+    assert test_db.explains == ["SELECT 1 FROM dual"]
+
+
+def test_test_explain_bad_statement_maps_to_400(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "d", "user": "u", "password": "p"},
+        headers=_auth(),
+    )
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/explain",
+        method="POST",
+        body={"sql": "SELECT * FROM bad"},
+        headers=_auth(),
+    )
+    assert status == 400
+    assert "ORA-00942" in payload["error"]
+
+
+def test_test_disconnect(running_test_server):
+    base_url, _db, test_db = running_test_server
+    _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "d", "user": "u", "password": "p"},
+        headers=_auth(),
+    )
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/disconnect", method="POST", body={}, headers=_auth()
+    )
+    assert status == 200
+    assert payload == {"ok": True}
+    assert test_db.disconnect_calls == 1
+    assert test_db.connected is False
+
+
+def test_health_reports_the_test_connection_separately(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    status, _headers, payload = _request(f"{base_url}/api/health")
+    assert status == 200
+    assert payload["connected"] is False
+    assert payload["testConnected"] is False
+
+    _request(
+        f"{base_url}/api/test/connect",
+        method="POST",
+        body={"dsn": "d", "user": "u", "password": "p"},
+        headers=_auth(),
+    )
+    _status, _headers, payload = _request(f"{base_url}/api/health")
+    # Source connection still closed; only the test one opened.
+    assert payload["connected"] is False
+    assert payload["testConnected"] is True
+
+
+def test_test_log_lists_executed_statements(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    status, _headers, payload = _request(f"{base_url}/api/test/log", headers=_auth())
+    assert status == 200
+    assert payload["items"][0]["statement"] == "SELECT 1 FROM dual"
+
+
+def test_test_log_requires_a_token(running_test_server):
+    base_url, _db, _test_db = running_test_server
+    status, _headers, _payload = _request(f"{base_url}/api/test/log")
+    assert status == 401
+
+
+def test_server_creates_its_own_test_db_when_none_is_given(running_server):
+    """create_server() must never route /api/test/* at the source connection."""
+    base_url, db = running_server
+    _request(
+        f"{base_url}/api/connect",
+        method="POST",
+        body={"dsn": "host:1521/pdb1", "user": "planviz", "password": "secret"},
+        headers=_auth(),
+    )
+    assert db.connected is True
+
+    # The source connection being open does not open the test one.
+    status, _headers, payload = _request(
+        f"{base_url}/api/test/exec",
+        method="POST",
+        body={"script": "SELECT 1 FROM dual;"},
+        headers=_auth(),
+    )
+    assert status == 409
+    assert payload["error"] == "test connection not open"
+
+
+def test_full_test_stack_over_http(monkeypatch):
+    """The real TestDb, driven over HTTP exactly as the frontend client does.
+
+    Mirrors src/lib/agent/client.ts: same paths, same request bodies, same
+    response shapes (`agentTestApi.test.ts` asserts these on the other side).
+    """
+    from test_test_db import FakeOracledb  # shared fake driver
+
+    from oraplanviz_agent import db as db_module
+    from oraplanviz_agent.db import TestDb
+
+    monkeypatch.setattr(db_module, "oracledb", FakeOracledb())
+
+    db = FakeDb()
+    server = create_server(
+        db, token=TOKEN, allowed_origins=[ALLOWED_ORIGIN], port=0, test_db=TestDb()
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, _headers, payload = _request(
+            f"{base_url}/api/test/connect",
+            method="POST",
+            body={"dsn": "//host:1521/scratch", "user": "eval", "password": "pw"},
+            headers=_auth(),
+        )
+        assert status == 200
+        assert payload == {"ok": True, "oracleVersion": "19.27.0.0.0"}
+
+        status, _headers, payload = _request(
+            f"{base_url}/api/test/exec",
+            method="POST",
+            body={"script": "CREATE TABLE t (id NUMBER);\nSELECT id, name FROM t;\n"},
+            headers=_auth(),
+        )
+        assert status == 200
+        assert set(payload) == {"ok", "output", "errors"}
+        assert payload["ok"] is True
+        assert payload["errors"] == []
+        assert "Table created." in payload["output"]
+        assert "2 rows selected." in payload["output"]
+
+        status, _headers, payload = _request(
+            f"{base_url}/api/test/explain",
+            method="POST",
+            body={"sql": "SELECT * FROM t WHERE id = :id"},
+            headers=_auth(),
+        )
+        assert status == 200
+        assert list(payload) == ["dbmsXplanText"]
+        assert payload["dbmsXplanText"].startswith("Plan hash value:")
+
+        status, _headers, payload = _request(f"{base_url}/api/test/log", headers=_auth())
+        assert status == 200
+        assert [item["kind"] for item in payload["items"]] == ["sql", "sql", "explain"]
+        assert all(item["ok"] for item in payload["items"])
+
+        status, _headers, payload = _request(
+            f"{base_url}/api/test/disconnect", method="POST", body={}, headers=_auth()
+        )
+        assert status == 200
+        assert payload == {"ok": True}
+
+        # ...and the source connection was never touched along the way.
+        assert db.connect_calls == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_unknown_path_404(running_server):

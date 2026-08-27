@@ -8,7 +8,7 @@ import secrets
 import sys
 
 from . import __version__
-from .db import Db, DbError
+from .db import Db, DbError, TestDb
 from .server import create_server
 
 DEFAULT_PORT = 8521
@@ -54,6 +54,8 @@ def _print_banner(host: str, port: int, token: str, allowed_origins) -> None:
     print(" Security note: this agent binds to localhost only and requires the")
     print(" bearer token above for every request except /api/health. Credentials")
     print(" you provide are held in memory only and are never written to disk.")
+    print(" Scripts sent to /api/test/* run on a SEPARATE test connection you")
+    print(" open yourself; every statement they run is logged to this console.")
     print("=" * 72)
 
 
@@ -65,6 +67,9 @@ def main(argv=None) -> int:
     token = args.token if args.token else secrets.token_urlsafe(24)
 
     db = Db()
+    # Separate session for approved script execution (/api/test/*). It is only
+    # ever opened from the app's Connect panel, never on startup.
+    test_db = TestDb()
 
     if args.dsn and args.user:
         password = getpass.getpass(f"Password for {args.user}@{args.dsn}: ")
@@ -74,7 +79,14 @@ def main(argv=None) -> int:
         except DbError as exc:
             print(f"Failed to connect on startup: {exc.message}", file=sys.stderr)
 
-    server = create_server(db, token=token, allowed_origins=allowed_origins, port=args.port, host=args.host)
+    server = create_server(
+        db,
+        token=token,
+        allowed_origins=allowed_origins,
+        port=args.port,
+        host=args.host,
+        test_db=test_db,
+    )
 
     _print_banner(args.host, args.port, token, allowed_origins)
 
@@ -84,6 +96,8 @@ def main(argv=None) -> int:
         print("\nShutting down...")
     finally:
         db.disconnect()
+        # Rolls back anything the test session left uncommitted.
+        test_db.disconnect()
         server.server_close()
 
     return 0

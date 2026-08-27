@@ -91,6 +91,11 @@ You can also connect after startup from the app's Connect panel — it POSTs
 - **Credentials are held in agent process memory only** — never written to
   disk, never logged. They are lost when the agent process exits or you call
   `/api/disconnect`.
+- **Script execution is opt-in and segregated.** The agent only runs SQL you
+  send to `/api/test/*`, and only on the separate test connection you opened
+  yourself (see [The test connection](#the-test-connection-apitest)). Give that
+  connection a scratch schema with the narrowest privileges the scripts need —
+  the plan-reading connection stays read-only.
 
 ## Licensing note
 
@@ -147,6 +152,14 @@ an `Authorization: Bearer <token>` header.
 | GET    | `/api/sql/recent`   | Query `?source=cursor|monitor` → `{ items: [...] }`. |
 | GET    | `/api/plan`         | Query `?sqlId=&source=cursor|monitor|awr&childNumber=&sqlExecId=` → `{ source, text }` (raw plan text — the app auto-detects the format). |
 | GET    | `/api/metadata`     | Query `?sqlId=[&planHash=]` → `{ bundle }` — an `ora-plan-metadata` v2 JSON bundle (object/column/index statistics, constraints, DDL, optimizer environment) for the objects referenced by the SQL_ID. |
+| POST   | `/api/test/connect` | Body `{ dsn, user, password }` → `{ ok, oracleVersion }` — opens the **separate test connection** (see below). |
+| POST   | `/api/test/exec`    | Body `{ script }` → `{ ok, output, errors[] }` — runs a user-approved script on the test connection. |
+| POST   | `/api/test/explain` | Body `{ sql }` → `{ dbmsXplanText }` — `EXPLAIN PLAN` + `DBMS_XPLAN.DISPLAY` on the test connection. |
+| POST   | `/api/test/disconnect` | → `{ ok: true }` — rolls back, then closes the test connection. |
+| GET    | `/api/test/log`     | → `{ items: [...] }` — every statement the test connection has run this session. |
+
+`/api/health` also reports `testConnected`, so the app can tell whether script
+execution is available without opening a connection.
 
 ### Metadata bundles
 
@@ -158,12 +171,75 @@ instead of failing the request. For full coverage (DDL of other schemas'
 objects, segment sizes, SQL plan baselines/profiles/directives) connect as a
 user with `SELECT_CATALOG_ROLE`.
 
+## The test connection (`/api/test/*`)
+
+The app's AI analysis can propose a script — build a scratch table, gather
+stats a certain way, try a hint — and, **after you approve it in the UI**, ask
+the agent to run it. That never happens on the connection your plans are read
+from:
+
+- **A second, separate Oracle session.** `/api/connect` and `/api/test/connect`
+  are independent; the read-only source connection never executes AI- or
+  user-authored SQL. Point the test connection at a scratch schema, not at the
+  database you took the plan from.
+- **Nothing runs unapproved.** The agent executes exactly what a
+  `/api/test/exec` call contains. Requiring a per-call approval before that call
+  is the app's job; the agent's job is to keep the sessions apart and to record
+  everything.
+- **Statement log.** Every statement (including each `EXPLAIN PLAN`) is logged
+  to the agent's console *and* kept in memory for `/api/test/log`, with its
+  start time, duration, and error if it failed. The log resets on each
+  `/api/test/connect`.
+- **No implicit commit.** The agent never commits for you, and
+  `/api/test/disconnect` (and agent shutdown) rolls back first. A script that
+  contains `COMMIT;` still commits — and DDL commits itself, as always in
+  Oracle.
+
+### What `/api/test/exec` accepts
+
+A SQL*Plus-flavoured *script*, not a single statement:
+
+- `;` terminates ordinary SQL; a lone `/` terminates a PL/SQL block
+  (`DECLARE` / `BEGIN` / `CREATE PROCEDURE|FUNCTION|PACKAGE|TRIGGER|TYPE`).
+  Semicolons inside literals, quoted identifiers, and comments do not split.
+- Comments are passed through untouched, so optimizer hints survive.
+- SQL*Plus client commands (`SET SERVEROUTPUT ON`, `SPOOL`, `PROMPT`, `@file`,
+  …) cannot be sent to a database; they are skipped and noted in the transcript
+  instead of failing the script. `EXEC proc(...)` is rewritten to
+  `BEGIN proc(...); END;`.
+- Every statement is attempted even after one fails, exactly like SQL*Plus with
+  `WHENEVER SQLERROR CONTINUE`. `ok` is `false` when anything failed and
+  `errors[]` lists them; the HTTP status is still 200, because the transcript is
+  the point. A missing connection (409), a bad body (400), and an oversized
+  script (413) *are* HTTP errors.
+- `output` is a transcript: each statement echoed after `SQL> `, followed by its
+  result — query results as a text table (first 100 rows), DML/DDL as a
+  SQL*Plus-style confirmation, plus anything the script wrote with
+  `DBMS_OUTPUT` (enabled automatically).
+
+`/api/test/explain` takes one statement. Bind placeholders are bound to NULL so
+the statement can be explained without values: `EXPLAIN PLAN` never peeks bind
+values anyway, and NULL character binds are the one direction Oracle resolves
+without forcing a conversion on the column side.
+
 ## Development
 
 ```bash
 pip install -e ".[dev]"
 python3 -m pytest -q
 ```
+
+The live end-to-end suite is skipped unless you point it at a real database:
+
+```bash
+ORAPLANVIZ_E2E_DSN=//host:1521/service \
+ORAPLANVIZ_E2E_USER=scratch \
+ORAPLANVIZ_E2E_PASSWORD=... \
+python3 -m pytest -q tests/test_e2e_live.py
+```
+
+It creates and drops its own `OPV_E2E_*` scratch table, so use a schema you
+don't mind writing to.
 
 Tests run without the real `oracledb` driver installed — `db.py` imports it
 lazily and the test suite monkeypatches a fake driver in its place.
