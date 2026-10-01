@@ -1,12 +1,12 @@
 # Local DB-Connect Agent for the Oracle Execution Plan Visualizer
 
-> **Status (2026-07-21, `main`):** Phases 1–4 implemented. The Python agent has been extracted to its own adjacent repo `oraplanviz-agent` (`~/claude_projects/oraplanviz-agent`); the frontend repo (`ora_explain_plan_viz`) keeps only the frontend integration (Connect panel behind `VITE_ENABLE_DB_AGENT`, `src/lib/agent/client.ts`), merged to its `main` (commit `808d5ca`).
+> **Status (2026-07-21, `main`; status 2026-10-01 below):** Phases 1–4 implemented. The Python agent has been extracted to its own adjacent repo, since renamed `oraplanviz-agent` → `oraplanviz-db-connector` (`~/claude_projects/oraplanviz-db-connector`; the CLI/package is still `oraplanviz-agent`). Phase 3 `/api/test/*` endpoints shipped in v0.2.0. The frontend repo (`ora_explain_plan_viz`) keeps only the frontend integration (Connect panel behind `VITE_ENABLE_DB_AGENT`, `src/lib/agent/client.ts`), merged to its `main` (commit `808d5ca`).
 >
 > **Phase 4 (`/api/metadata`) done** — implemented by vendoring `gather_plan_metadata.sql` as package data and transforming its anonymous PL/SQL block at runtime (`metadata.py`): `'&arg1'`/`'&arg2'` become `:arg1`/`:arg2` binds, the DBMS_OUTPUT emit loop becomes a `:bundle` OUT CLOB — byte-identical `ora-plan-metadata` v2 JSON with zero contract drift. Unit suite: 39 tests, driver-free.
 >
 > **dbmint e2e DONE (2026-07-21):** all 8 live tests pass against PDB1 (19.27) — connect, recent SQL, cursor plan, monitor plan (real Tuning Pack XML), metadata bundles for dictionary and heap-table queries. Captured real agent responses were also validated against the frontend parsers in `ora_explain_plan_viz` (cursor ALLSTATS text → runtime-stats parser with actual stats; monitor XML → `sql_monitor_xml` with sqlId; bundle → `parseBundle` v2 with TABLE/INDEX objects, column stats, DDL, zero coverage warnings). Notes: PLANVIZ was granted `SELECT_CATALOG_ROLE` in PDB1; from the Mac the DB is reached via SSH tunnel `ssh -p 2201 -L 15210:192.168.56.121:1521 oracle@dbmint` (port 1521 isn't forwarded; listener binds to poug-dg1.localdomain = 192.168.56.121), DSN `//127.0.0.1:15210/pdb1.world`.
 >
-> Remaining: frontend "Load plan + metadata" button + command-palette entry (in `ora_explain_plan_viz`), cross-browser Pages-origin verification (deprioritized), PyPI publish (user action).
+> Remaining (status 2026-10-01): the frontend "Load plan + metadata" option (ConnectPanel `attachMetadata` checkbox → `fetchPlanWithMetadata`) and the command-palette entry ("Connect to database…") are DONE. Only cross-browser Pages-origin verification (moot while the feature is gated off Pages) and PyPI publish (user action) remain.
 
 ## Context
 

@@ -10,8 +10,11 @@ to directly from your browser.
 
 Your credentials and your execution plan data never leave your machine: the
 agent only ever talks to your Oracle database and to your browser on
-`127.0.0.1`. The hosted app (including the GitHub Pages-hosted version) never
-sees them.
+`127.0.0.1`. No server, not even the app's host, ever sees them.
+
+The Connect panel is only present in dev or self-hosted builds of the app made
+with `VITE_ENABLE_DB_AGENT=1` (for example `VITE_ENABLE_DB_AGENT=1 npm run dev`).
+It is not part of the public GitHub Pages build.
 
 ## Install
 
@@ -44,8 +47,7 @@ Useful flags:
                          this unless you understand the risk)
 --allow-origin ORIGIN   Allowed CORS origin (repeatable). Defaults to
                          http://localhost:5173 and http://127.0.0.1:5173.
-                         Add https://davidbudac.github.io to use the hosted
-                         app against your local agent.
+                         Add your origin if you self-host the app elsewhere.
 --token TOKEN           Bearer token clients must supply. A random one is
                          generated if omitted.
 --dsn DSN               Oracle DSN to connect to on startup, e.g.
@@ -55,11 +57,11 @@ Useful flags:
                          as a command-line argument).
 ```
 
-Example, connecting on startup and allowing the hosted app's origin:
+Example, connecting on startup and allowing a self-hosted app origin:
 
 ```bash
 oraplanviz-agent \
-  --allow-origin https://davidbudac.github.io \
+  --allow-origin https://planviz.internal.example \
   --allow-origin http://localhost:5173 \
   --dsn dbhost.example.com:1521/pdb1.example.com \
   --user planviz
@@ -81,13 +83,13 @@ You can also connect after startup from the app's Connect panel — it POSTs
   back, so browsers block cross-origin reads from other sites.
 - **Chrome Private Network Access**: the agent answers `OPTIONS` preflights
   carrying `Access-Control-Request-Private-Network: true` with
-  `Access-Control-Allow-Private-Network: true`, which Chrome requires for a
-  public HTTPS page (like GitHub Pages) to reach `127.0.0.1`.
+  `Access-Control-Allow-Private-Network: true`, which Chrome requires for an
+  HTTPS page (e.g. a self-hosted build) to reach `127.0.0.1`.
 - **Mixed content**: Chrome and Firefox treat `http://127.0.0.1` as
   "potentially trustworthy", so an `https://` page can fetch it. **Safari
   blocks this** (no localhost exception for mixed content) — Safari users
   should run the app's local dev server (`npm run dev`, `http://localhost`)
-  instead of the hosted HTTPS app.
+  instead of an HTTPS-hosted build.
 - **Credentials are held in agent process memory only** — never written to
   disk, never logged. They are lost when the agent process exits or you call
   `/api/disconnect`.
@@ -146,7 +148,7 @@ an `Authorization: Bearer <token>` header.
 
 | Method | Path                | Description |
 |--------|---------------------|--------------|
-| GET    | `/api/health`       | `{ version, connected, oracleVersion }` — no auth required. |
+| GET    | `/api/health`       | `{ version, connected, oracleVersion, testConnected }` — no auth required. |
 | POST   | `/api/connect`      | Body `{ dsn, user, password }` → `{ ok, oracleVersion }`. |
 | POST   | `/api/disconnect`   | → `{ ok: true }`. |
 | GET    | `/api/sql/recent`   | Query `?source=cursor|monitor` → `{ items: [...] }`. |
